@@ -185,12 +185,13 @@ public class CrptApi {
     }
 
     public static void main(String[] args) {
-// Example: 5 requests per second per thread
+        // Образец: создаём экземпляр класса с 5 запросами в секунду
         CrptApi api = new CrptApi(TimeUnit.SECONDS, 5);
 
+        // Анонимный класс Runnable
         Runnable task = () -> {
             try {
-                for (int i = 0; i < 10; i++) { // Each thread makes 10 requests
+                for (int i = 0; i < 10; i++) { // Каждый поток запускает 10 запросов
                     HttpResponse<String> response = api.createDocument("{\"key\":\"value\"}");
                     System.out.println("Response: " + response.body() + " in thread: " + Thread.currentThread().getName());
                 }
@@ -203,7 +204,7 @@ public class CrptApi {
             }
         };
 
-        // Create multiple threads to simulate concurrent requests
+        // Запускаем 5 потоков для запуска множества потоков
         for (int i = 0; i < 5; i++) {
             new Thread(task, "Thread-" + i).start();
         }
