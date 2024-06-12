@@ -2,13 +2,13 @@ package org.example;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -16,59 +16,82 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.LocalDate;
 import java.util.List;
+
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * @author Larin_ts
+ * Класс посылающий определенное количество
+ * запросов на API, за определенное количество времени
+ */
 public class CrptApi {
-
-    private final AtomicInteger requestCount;
-    private TimeUnit timeUnit;
+    private static final Logger logger = LogManager.getLogger(CrptApi.class);
     private static final String URL = "https://ismp.crpt.ru/api/v3/lk/documents/create";
+    private final HttpClient client;
+    private final ThreadLocal<AtomicInteger> requestCount;
+    private final ThreadLocal<Long> lastRequestTime;
+    private final int requestLimit;
+    private final long intervalMillis;
 
 
-    public CrptApi(AtomicInteger requestCount, TimeUnit timeUnit) {
-        this.requestCount = requestCount;
-        this.timeUnit = timeUnit;
+    /**
+     * @param timeUnit     - заданный интервал времени
+     * @param requestLimit - заданное количество запросов к API
+     */
+    public CrptApi(TimeUnit timeUnit, int requestLimit) {
+        this.client = HttpClient.newHttpClient();
+        this.requestLimit = requestLimit;
+        this.intervalMillis = timeUnit.toMillis(1);
+
+        // Для каждого потока создаёт экземпляр AtomicInteger
+        this.requestCount = ThreadLocal.withInitial(() -> new AtomicInteger(0));
+        // Время последнего запроса для каждого потока
+        this.lastRequestTime = ThreadLocal.withInitial(System::currentTimeMillis);
     }
 
-    public synchronized Document createDocument() {
-        String requestBody = """
-                {"description": { "participantInn": "string" },\s
-                "doc_id": "string",\s
-                "doc_status": "string",\s
-                "doc_type": "LP_INTRODUCE_GOODS",\s
-                "importRequest": true,\s
-                "owner_inn": "string",\s
-                "participant_inn": "string",\s
-                "producer_inn": "string",\s
-                "production_date": "2020-01-23",\s
-                "production_type": "string",\s
-                "products": [ { "certificate_document": "string",\s
-                "certificate_document_date": "2020-01-23",\s
-                "certificate_document_number": "string",\s
-                "owner_inn": "string", "producer_inn": "string",\s
-                "production_date": "2020-01-23", "owned_code": "string",\s
-                "uit_code": "string", "unit_code": "string" } ],\s
-                "reg_date": "2020-01-23",\s
-                "reg_number": "string"}
-                """;
-        try {
-            if (this.requestCount.get() == 0) {
-                throw new OutOfLimitConnectionException();
-            } else {
-                HttpClient client = HttpClient.newHttpClient();
-                HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(URL))
-                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                        .build();
-                HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-            }
-        } catch (Exception e) {
-            System.out.println();
+    /**
+     * Метод отвечающий за отправку определенного количества запросов
+     * к API
+     *
+     * @param requestBody - Строка формата json
+     * @return - возвращает ответ от API
+     * @throws Exception - проброс исключения
+     */
+    public HttpResponse<String> createDocument(String requestBody) throws Exception {
+        AtomicInteger count = requestCount.get();
+        long currentTime = System.currentTimeMillis();
+        long lastTime = lastRequestTime.get();
+
+        // Проверяем вышло ли время с последнего запроса
+        if ((currentTime - lastTime) > intervalMillis) {
+            throw new TimeLimitExceededException();
         }
-return null;
+
+        // Увеличиваем запрос и в случае выхода за лимит, выбрасываем исключение
+        if (count.incrementAndGet() > requestLimit) {
+            count.decrementAndGet();  // rollback the increment
+            throw new OutOfLimitConnectionException();
+        }
+
+        try {
+            // Обновляем время последнего запроса
+            lastRequestTime.set(currentTime);
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(URL))
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .build();
+            return client.send(request, HttpResponse.BodyHandlers.ofString());
+        } catch (Exception e) {
+            count.decrementAndGet();  // rollback the increment in case of error
+            logger.error("Failed to process request", e);
+            throw new RuntimeException("Failed to process request", e);
+        }
     }
 
+    /**
+     * POJO для JSON объекта и сериализации
+     */
     @Data
     @NoArgsConstructor
     @AllArgsConstructor
@@ -101,6 +124,9 @@ return null;
         private String regNumber;
     }
 
+    /**
+     * POJO для JSON объекта
+     */
     @Data
     @NoArgsConstructor
     @AllArgsConstructor
@@ -109,6 +135,10 @@ return null;
         private String participantInn;
     }
 
+    /**
+     * POJO для JSON
+     * объекта
+     */
     @Data
     @Builder
     @NoArgsConstructor
@@ -136,53 +166,46 @@ return null;
         private String unitCode;
     }
 
+    /**
+     * Кастомное исключение
+     */
     private static class OutOfLimitConnectionException extends Exception {
+        public OutOfLimitConnectionException() {
+            super("Request limit exceeded");
+        }
+    }
 
+    /**
+     * Кастомное исключение
+     */
+    public static class TimeLimitExceededException extends Exception {
+        public TimeLimitExceededException() {
+            super("Time limit exceeded between requests");
+        }
     }
 
     public static void main(String[] args) {
-//        ObjectMapper mapper = new ObjectMapper();
-//        mapper.registerModule(new JavaTimeModule());
-//        mapper.setDateFormat(new SimpleDateFormat("yyyy-MM-dd"));
-//        Document document = Document.builder()
-//                .description(new Description("test"))
-//                .docId("test")
-//                .docStatus("test")
-//                .docType("test")
-//                .importRequest(true)
-//                .ownerInn("test")
-//                .participantInn("test")
-//                .producerInn("test")
-//                .productionDate(LocalDate.now())
-//                .productionType("test")
-//                .products(List.of(Product.builder()
-//                        .certificateDocument("test")
-//                        .certificateDocumentDate(LocalDate.now())
-//                        .certificateDocumentNumber("test")
-//                        .ownerInn("test")
-//                        .producerInn("test")
-//                        .productionDate(LocalDate.now())
-//                        .ownedCode("test")
-//                        .uitCode("test")
-//                        .unitCode("test")
-//                        .build()))
-//                .regDate(LocalDate.now())
-//                .regNumber("test")
-//                .build();
-//        try {
-//            String json = mapper.writeValueAsString(document);
-//            System.out.println(json);
-//        } catch (JsonProcessingException e) {
-//            throw new RuntimeException(e);
-//        }
-//        try {
-//            Document document2 = mapper.readValue(requestBody, Document.class);
-//            System.out.println(document2);
-//        } catch (JsonProcessingException e) {
-//            throw new RuntimeException(e);
-//        }
+// Example: 5 requests per second per thread
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 5);
 
+        Runnable task = () -> {
+            try {
+                for (int i = 0; i < 10; i++) { // Each thread makes 10 requests
+                    HttpResponse<String> response = api.createDocument("{\"key\":\"value\"}");
+                    System.out.println("Response: " + response.body() + " in thread: " + Thread.currentThread().getName());
+                }
+            } catch (OutOfLimitConnectionException e) {
+                System.err.println("Request limit exceeded. Please wait. Thread: " + Thread.currentThread().getName());
+            } catch (TimeLimitExceededException e) {
+                System.err.println("Time limit exceeded. Thread: " + Thread.currentThread().getName());
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        };
+
+        // Create multiple threads to simulate concurrent requests
+        for (int i = 0; i < 5; i++) {
+            new Thread(task, "Thread-" + i).start();
+        }
     }
-
-
 }
